@@ -543,6 +543,18 @@ async function loadDashboard() {
     const planTotal = planSebas + planVale;
 
     const avanceTotal = planTotal > 0 ? Math.round(totalFOB / planTotal * 100) : 0;
+    // Expose to window for AI context
+    window._totalSebas = totalSebas;
+    window._totalVale = totalVale;
+    window._planSebas = planSebas;
+    window._planVale = planVale;
+    // Build ventas context string from real data
+    if (aggSebas.length || aggVale.length) {
+      const topRows = [...aggSebas.slice(0,5), ...aggVale.slice(0,5)];
+      window._ventasContext = topRows.map(r => 
+        `${r.cli} ${r.cat} (${r.cli===aggSebas[0]?.cli?'Sebas':'Vale'}): $${Math.round(r.fob/1000)}K FOB`
+      ).join('. ');
+    }
 
     // ── KPIs GLOBALES ──
     renderKPIs('kpi-grid', [
@@ -752,11 +764,31 @@ async function loadDashboard() {
   }
 }
 
-// ── IA ─────────────────────────────────────────────────────────────────────
-const CTX = `Sos el asistente comercial de Blauw, trader con base en Chile y operaciones en China y Argentina. El gerente es Ignacio (Nacho). Datos S27 mayo 2026:
-VALE POMAR (KAM Juv/Men/Mujer/Kids): Plan $1.57M, venta $628K (40%). Fala MEN: $205K/$750K (27%) RIESGO. Fala Juvenil: $261K/$345K (76%) bien. Fala Woman/Kids: $0. La Polar: $86K/$90K (95%). Bayona: $53K/$60K (88%). Wildlama: $24K/$80K.
-SEBAS VERGARA (KAM Sports): Plan $2.66M, venta $920K (35%). Fala Socks Diadora: $507K/$950K (53%). Fala Balones: $7K/$400K (2%) RIESGO CRÍTICO. Ripley Chile: $283K/$250K (113%) SUPERÓ plan. Paris: $0/$118K.
-Respondé en español rioplatense, conciso y directo.`;
+// ── IA con Gemini ──────────────────────────────────────────────────────────
+const GEMINI_KEY = 'AQ.Ab8RN6IOUEB-zpU-UP3QhTF2WQC75fIHXOeOKu6xf-ZeAPvhpA';
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
+
+function buildContext() {
+  // Build dynamic context from loaded data
+  const totalFOB = (window._totalSebas||920000) + (window._totalVale||628000);
+  const planTotal = (window._planSebas||2663458) + (window._planVale||1565000);
+  const avance = planTotal > 0 ? Math.round(totalFOB/planTotal*100) : 37;
+  return `Sos el asistente comercial de Blauw, trader con base en Chile y operaciones en China y Argentina. El gerente comercial es Ignacio (Nacho).
+
+DATOS REALES S27 (cargados desde Google Sheets):
+- Venta total equipo: $${Math.round(totalFOB/1000)}K / Plan $${Math.round(planTotal/1000)}K (${avance}% avance)
+- SEBAS VERGARA (KAM Sports): $${Math.round((window._totalSebas||920000)/1000)}K / $${Math.round((window._planSebas||2663458)/1000)}K
+- VALE POMAR (KAM Juv/Men/Mujer/Kids): $${Math.round((window._totalVale||628000)/1000)}K / $${Math.round((window._planVale||1565000)/1000)}K
+
+DETALLE POR CLIENTE/CATEGORÍA (datos reales de las planillas):
+${window._ventasContext || `Falabella MEN (Vale): $205K/$750K (27%) RIESGO. Fala Juvenil (Vale): $261K/$345K (76%). Fala Balones Diadora (Sebas): $7K/$400K (2%) RIESGO CRÍTICO. Fala Socks Diadora (Sebas): $507K/$950K (53%). Ripley Chile (Sebas): $283K/$250K (113%) SUPERÓ plan. La Polar (Vale): $86K/$90K (95%). Bayona (Vale): $53K/$60K (88%).`}
+
+PROYECTOS ACTIVOS:
+Vale: Socks/Pantuflas Navidad Fala MEN (en curso), Accesorios Juvenil Starter/Bearcliff (cotización), Wappy S27 urgente (prospecto).
+Sebas: Cierre Diadora S27 reunión 11/05 (cierre inminente), Rugby Mundial 2027 Cencosud (prospecto), Duffel Rescue Ripley (cotización).
+
+Respondé en español rioplatense, de forma concisa y directa. Usá los datos reales para tus análisis.`;
+}
 
 async function askAI(preset) {
   const inp = document.getElementById('ai-inp');
@@ -768,13 +800,22 @@ async function askAI(preset) {
   const td = document.createElement('div'); td.className='msg a'; td.innerHTML='<div class="bbl"><div class="typing"><span></span><span></span><span></span></div></div>'; msgs.appendChild(td);
   msgs.scrollTop = msgs.scrollHeight;
   try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ model:'claude-sonnet-4-20250514', max_tokens:800, system:CTX, messages:[{role:'user',content:msg}] })
+    const r = await fetch(GEMINI_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: buildContext() }] },
+        contents: [{ role: 'user', parts: [{ text: msg }] }],
+        generationConfig: { maxOutputTokens: 800, temperature: 0.3 }
+      })
     });
     const data = await r.json();
-    td.querySelector('.bbl').textContent = data.content?.map(b=>b.text||'').join('') || 'Sin respuesta.';
-  } catch(e) { td.querySelector('.bbl').textContent = 'Error. Intentá de nuevo.'; }
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || 
+                  data.error?.message || 'Sin respuesta.';
+    td.querySelector('.bbl').textContent = reply;
+  } catch(e) {
+    td.querySelector('.bbl').textContent = 'Error al conectar con Gemini. Intentá de nuevo.';
+  }
   msgs.scrollTop = msgs.scrollHeight;
 }
 
